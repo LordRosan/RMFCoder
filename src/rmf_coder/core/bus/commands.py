@@ -10,7 +10,7 @@ class PingCommand(BaseModel):
 
 class PongResult(BaseModel):
     server_version: str
-    uptime: int
+    uptime_ms: int
     received_at: str
 
 
