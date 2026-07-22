@@ -131,3 +131,4 @@ class SocketServer:
 
     async def _send(self, writer: asyncio.StreamWriter, msg: BaseModel) -> None:
         writer.write(msg.model_dump_json().encode() + b"\n")
+        await writer.drain()

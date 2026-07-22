@@ -11,12 +11,37 @@ from rmf_coder.core.bus.envelope import (
     JsonRpcSuccess,
     make_error,
 )
-from rmf_coder.core.bus.events import CoreStartedEvent, Event
+from rmf_coder.core.bus.events import (
+    CoreStartedEvent,
+    Event,
+    RunStartedEvent,
+    RunFinishedEvent,
+    StepStartedEvent,
+    StepFinishedEvent,
+    ToolCallStartedEvent,
+    ToolCallFinishedEvent,
+    ToolCallFailedEvent,
+    LlmTokenEvent,
+    LlmUsageEvent,
+    LlmModelSelectedEvent,
+    LogLineEvent,
+)
 
 __all__ = [
     "Command",
     "CoreStartedEvent",
     "Event",
+    "RunStartedEvent",
+    "RunFinishedEvent",
+    "StepStartedEvent",
+    "StepFinishedEvent",
+    "ToolCallStartedEvent",
+    "ToolCallFinishedEvent",
+    "ToolCallFailedEvent",
+    "LlmTokenEvent",
+    "LlmUsageEvent",
+    "LlmModelSelectedEvent",
+    "LogLineEvent",
     "INTERNAL_ERROR",
     "INVALID_PARAMS",
     "INVALID_REQUEST",
