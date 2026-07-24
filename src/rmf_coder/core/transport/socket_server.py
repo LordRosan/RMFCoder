@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 from collections.abc import Awaitable, Callable
+from contextvars import ContextVar
 from typing import Any
 
 from pydantic import BaseModel, ValidationError
@@ -17,21 +18,32 @@ from rmf_coder.core.bus.envelope import (
     JsonRpcSuccess,
     make_error
 )
+from rmf_coder.core.transport.ipc_broadcaster import IpcEventBroadcaster
 
 logger = logging.getLogger(__name__)
 
 type CommandHandler = Callable[[dict[str, Any]], Awaitable[Any]]
+
+_writer_var: ContextVar[asyncio.StreamWriter] = ContextVar("_writer_var")
+
+
+def get_connection_writer() -> asyncio.StreamWriter:
+    return _writer_var.get()
+
 
 _MAX_LINE_BYTES = 1 * 1024 * 1024
 
 
 class SocketServer:
 
-    def __init__(self, host: str, port: int) -> None:
+    def __init__(
+            self, host: str, port: int, broadcaster: IpcEventBroadcaster | None = None
+    ) -> None:
         self.host = host
         self.port = port
         self._handlers: dict[str, CommandHandler] = {}
         self._server: asyncio.AbstractServer | None = None
+        self._broadcaster = broadcaster
 
     def register(self, method: str, handler: CommandHandler) -> None:
         self._handlers[method] = handler
@@ -69,6 +81,8 @@ class SocketServer:
         try:
             await self._read_loop(reader, writer)
         finally:
+            if self._broadcaster is not None:
+                self._broadcaster.unsubscribe(writer)
             writer.close()
             try:
                 await asyncio.wait_for(writer.wait_closed(), timeout=1.0)
@@ -113,6 +127,7 @@ class SocketServer:
             )
             return
 
+        _writer_var.set(writer)
         try:
             result = await handler(req.params)
         except ValidationError as e:
