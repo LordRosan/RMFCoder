@@ -38,6 +38,7 @@ class AgentLoop:
                     tool_schemas=self._registry.tool_schemas(),
                     bus=self._bus,
                     run_id=context.run_id,
+                    step=context.step,
                 )
             except asyncio.CancelledError:
                 context.mark_failed("cancelled")
@@ -59,6 +60,7 @@ class AgentLoop:
                     context.add_tool_result(tc.id, result.content, is_error=result.is_error)
 
             if response.stop_reason == "end_turn":
+                context.result = response.text or ""
                 context.mark_success()
             elif context.step >= context.max_steps:
                 context.mark_failed("exceeded_max_steps")

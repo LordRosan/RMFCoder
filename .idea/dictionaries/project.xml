@@ -3,6 +3,7 @@
     <words>
       <w>ftype</w>
       <w>peername</w>
+      <w>returncode</w>
       <w>toolu</w>
     </words>
   </dictionary>

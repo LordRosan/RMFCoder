@@ -38,6 +38,8 @@ class EventSubscribeResult(BaseModel):
 
 
 Command = Annotated[
-    PingCommand | AgentRunCommand | EventSubscribeCommand,
+    PingCommand |
+    AgentRunCommand |
+    EventSubscribeCommand,
     Discriminator("type"),
 ]

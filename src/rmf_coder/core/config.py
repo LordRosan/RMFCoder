@@ -1,9 +1,11 @@
 from __future__ import annotations
+
 import os
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
 from dotenv import load_dotenv
 
 _DEFAULT_HOST_ = "127.0.0.1"
@@ -14,6 +16,7 @@ _DEFAULT_LOG_FORMAT_ = "text"
 _DEFAULT_CONFIG_PATH_ = "~/.rmf_coder/config.toml"
 _DEFAULT_MAX_STEPS = 20
 _DEFAULT_MODEL = "claude-sonnet-4-7"
+_DEFAULT_TRACE_FILE = "~/.rmf/traces/daemon.jsonl"
 
 
 @dataclass
@@ -35,16 +38,25 @@ class LlmConfig:
 
 
 @dataclass
+class TraceConfig:
+    enabled: bool = True
+    file: str = _DEFAULT_TRACE_FILE
+    include_llm_payload: bool = True
+
+
+@dataclass
 class RMFConfig:
     host: str = _DEFAULT_HOST_
     port: int = _DEFAULT_PORT_
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     agent: AgentConfig = field(default_factory=AgentConfig)
     llm: LlmConfig = field(default_factory=LlmConfig)
+    trace: TraceConfig = field(default_factory=TraceConfig)
 
 
 def get_config() -> RMFConfig:
     config = RMFConfig()
+
     load_dotenv(".env", override=False)
     config_path = Path(os.environ.get("RMF_CONFIG", _DEFAULT_CONFIG_PATH_)).expanduser()
 
@@ -61,7 +73,7 @@ def get_config() -> RMFConfig:
 
 
 def _apply_toml(config: RMFConfig, data: dict[str, Any]) -> None:
-    unknown = set(data.keys()) - {"core", "logging", "agent", "llm"}
+    unknown = set(data.keys()) - {"core", "logging", "agent", "llm", "trace"}
     if unknown:
         raise SystemExit(f"Unknown top-level config keys: {', '.join(sorted(unknown))}")
 
@@ -128,6 +140,29 @@ def _apply_toml(config: RMFConfig, data: dict[str, Any]) -> None:
                 raise SystemExit("Config error: llm.router must be a string")
             config.llm.router = val
 
+    if "trace" in data:
+        trace = data["trace"]
+        if not isinstance(trace, dict):
+            raise SystemExit("Config error: [trace] must be a table")
+        unknown_trace: set[str] = set(trace.keys()) - {"enabled", "file", "include_llm_payload"}
+        if unknown_trace:
+            raise SystemExit(f"Unknown [trace] keys: {', '.join(sorted(unknown_trace))}")
+        if "enabled" in trace:
+            val = trace["enabled"]
+            if not isinstance(val, bool):
+                raise SystemExit("Config error: trace.enabled must be a boolean")
+            config.trace.enabled = val
+        if "file" in trace:
+            val = trace["file"]
+            if not isinstance(val, str):
+                raise SystemExit("Config error: trace.file must be a string")
+            config.trace.file = val
+        if "include_llm_payload" in trace:
+            val = trace["include_llm_payload"]
+            if not isinstance(val, bool):
+                raise SystemExit("Config error: trace.include_llm_payload must be a boolean")
+            config.trace.include_llm_payload = val
+
 
 def _apply_env(config: RMFConfig) -> None:
     host = os.environ.get("RMF_HOST")
@@ -166,3 +201,15 @@ def _apply_env(config: RMFConfig) -> None:
     default_model = os.environ.get("RMF_LLM_DEFAULT_MODEL")
     if default_model is not None:
         config.llm.default_model = default_model
+
+    trace_enabled = os.environ.get("RMF_TRACE_ENABLED")
+    if trace_enabled is not None:
+        config.trace.enabled = trace_enabled.lower() not in ("0", "false", "no")
+
+    trace_file = os.environ.get("RMF_TRACE_FILE")
+    if trace_file is not None:
+        config.trace.file = trace_file
+
+    trace_payload = os.environ.get("RMF_TRACE_INCLUDE_LLM_PAYLOAD")
+    if trace_payload is not None:
+        config.trace.include_llm_payload = trace_payload.lower() not in ("0", "false", "no")

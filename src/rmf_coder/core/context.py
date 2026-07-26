@@ -13,6 +13,7 @@ class ExecutionContext:
     step: int = 0
     status: str = "running"
     reason: str | None = None
+    result: str = ""
 
     def __post_init__(self) -> None:
         if not self.messages:
