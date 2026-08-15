@@ -1,0 +1,144 @@
+from __future__ import annotations
+
+import asyncio
+import uuid
+from collections.abc import Callable
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Any
+
+from rmf_coder.core.bus.envelope import HandlerError
+from rmf_coder.core.bus.events import (
+    SessionClosedEvent,
+    SessionCreatedEvent,
+    SessionMessageReceivedEvent,
+    SessionResumedEvent,
+    SessionWaitingForInputEvent,
+)
+from rmf_coder.core.events.bus import EventBus
+from rmf_coder.core.runs import new_run_id
+from rmf_coder.core.session.model import Session, SessionMode
+from rmf_coder.core.session.store import SessionStore
+
+if TYPE_CHECKING:
+    from rmf_coder.core.runner import AgentRunner
+
+SESSION_NOT_FOUND = -32010
+SESSION_CLOSED = -32011
+SESSION_BUSY = -32012
+
+
+def _now() -> str:
+    return datetime.now(UTC).isoformat()
+
+
+class SessionManager:
+    def __init__(
+            self,
+            store: SessionStore,
+            runner_factory: Callable[[], AgentRunner],
+            bus: EventBus,
+    ) -> None:
+        self._store = store
+        self._runner_factory = runner_factory
+        self._bus = bus
+        self._session: dict[str, Session] = {}
+        self._locks: dict[str, asyncio.Lock] = {}
+
+    async def create(self, mode: SessionMode, title: str = "") -> Session:
+        sid = f"sess-{uuid.uuid4().hex[:12]}"
+        ts = _now()
+        session = Session(
+            id=sid,
+            mode=mode,
+            status="active",
+            title=title,
+            created_at=ts,
+            updated_at=ts,
+            run_ids=[],
+        )
+        self._session[sid] = session
+        self._locks[sid] = asyncio.Lock()
+        self._store.write_meta(session)
+        await self._bus.publish(SessionCreatedEvent(session_id=sid, mode=mode, ts=ts))
+        return session
+
+    async def send_massage(
+            self,
+            sid: str,
+            content: str,
+            *,
+            run_id: str | None = None,
+    ) -> str:
+        session = self._get_session(sid)
+        lock = self._locks[sid]
+        if lock.locked():
+            raise HandlerError(SESSION_BUSY, "session busy")
+
+        async with lock:
+            if session.status == "closed":
+                raise HandlerError(SESSION_CLOSED, "session already closed")
+
+            if session.status == "waiting_for_input":
+                await self._bus.publish(SessionResumedEvent(session_id=sid, ts=_now()))
+
+            self._store.append_message(sid, "user", content)
+            await self._bus.publish(
+                SessionMessageReceivedEvent(session_id=sid, content=content, ts=_now())
+            )
+
+            if not session.title:
+                session.title = content[:40]
+
+            run_id = run_id or new_run_id()
+            session.run_ids.append(run_id)
+            session.updated_at = _now()
+            self._store.write_meta(session)
+
+            runner = self._runner_factory()
+            await runner.run_and_capture(
+                content,
+                run_id=run_id,
+                session=session,
+                store=self._store,
+            )
+
+            session.updated_at = _now()
+            if session.mode == "one_shot":
+                session.status = "closed"
+                await self._bus.publish(
+                    SessionClosedEvent(session_id=sid, ts=session.updated_at)
+                )
+            else:
+                session.status = "waiting_for_input"
+                await self._bus.publish(
+                    SessionWaitingForInputEvent(
+                        session_id=sid,
+                        last_run_id=run_id,
+                        ts=session.updated_at
+                    )
+                )
+            self._store.write_meta(session)
+            return run_id
+
+    async def close(self, sid: str) -> None:
+        session = self._get_session(sid)
+        lock = self._locks[sid]
+        if lock.locked():
+            raise HandlerError(SESSION_BUSY, "session busy")
+        async with lock:
+            session.status = "closed"
+            session.updated_at = _now()
+            self._store.write_meta(session)
+            await self._bus.publish(
+                SessionClosedEvent(session_id=sid, ts=session.updated_at)
+            )
+
+    async def get_history(self, sid: str) -> list[dict[str, Any]]:
+        self._get_session(sid)
+        return self._store.read_messages(sid)
+
+    def _get_session(self, sid: str) -> Session:
+        session = self._session.get(sid)
+        if session is None:
+            raise HandlerError(SESSION_NOT_FOUND, "session not found")
+        return session

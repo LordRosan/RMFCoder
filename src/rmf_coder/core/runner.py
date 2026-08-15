@@ -14,10 +14,13 @@ from rmf_coder.core.llm.base import LLMProvider
 from rmf_coder.core.llm.provider import AnthropicProvider
 from rmf_coder.core.loop import AgentLoop
 from rmf_coder.core.runs import RUNS_DIR, new_run_id
+from rmf_coder.core.session.model import Session
+from rmf_coder.core.session.store import SessionStore
 from rmf_coder.core.task.manager import TaskManager
 from rmf_coder.core.tools.builtin import (
     BashTool,
     ListDirTool,
+    NoteSaveTool,
     ReadFileTool,
     TaskCreateTool,
     TaskGetTool,
@@ -59,7 +62,14 @@ class AgentRunner:
         self._run_dir = runs_dir or RUNS_DIR
         self._trace = trace
 
-    def _build_registry(self, task_manager: TaskManager) -> ToolRegistry:
+    def _build_registry(
+            self,
+            task_manager: TaskManager,
+            *,
+            session: Session | None = None,
+            store: SessionStore | None = None,
+            run_id: str | None = None,
+    ) -> ToolRegistry:
         registry = ToolRegistry()
         registry.register(ReadFileTool())
         registry.register(BashTool())
@@ -69,14 +79,30 @@ class AgentRunner:
         registry.register(TaskUpdateTool(task_manager))
         registry.register(TaskListTool(task_manager))
         registry.register(TaskGetTool(task_manager))
+        if session is not None and store is not None and run_id is not None:
+            registry.register(NoteSaveTool(store, session.id, run_id))
         return registry
 
     async def run(self, goal: str, *, run_id: str | None = None) -> None:
         await self.run_and_capture(goal, run_id=run_id)
 
-    async def run_and_capture(self, goal: str, *, run_id: str | None = None) -> RunOutcome:
+    async def run_and_capture(
+            self,
+            goal: str,
+            *,
+            run_id: str | None = None,
+            session: Session | None = None,
+            store: SessionStore | None = None,
+    ) -> RunOutcome:
         run_id = run_id or new_run_id()
-        run_path = self._run_dir / run_id
+        if session is not None and store is not None:
+            run_path = store.runs_dir(session.id) / run_id
+            history = store.read_messages(session.id)
+            notes = store.read_notes(session.id)
+        else:
+            run_path = self._run_dir / run_id
+            history = [{"role": "user", "content": goal}]
+            notes = ""
         run_path.mkdir(parents=True, exist_ok=True)
 
         task_manager = TaskManager(run_path / ".tasks")
@@ -89,30 +115,42 @@ class AgentRunner:
             run_id=run_id,
             goal=goal,
             max_steps=self._config.agent.max_steps,
+            prefill_messages=history,
+            session_notes=notes,
         )
+        prefill_len = len(history)
 
         async with EventWriter(run_path / "events.jsonl") as writer:
             writer.subscribe(bus)
             await bus.publish(RunStartedEvent(run_id=run_id, goal=goal, ts=_now()))
 
-            provider: LLMProvider = self._provider or AnthropicProvider(self._config.llm.default_model)
-            if self._trace is not None:
-                provider = TracingProvider(
-                    provider,
-                    self._trace,
-                    include_payload=self._config.trace.include_llm_payload,
-                )
-
-            registry = self._build_registry(task_manager)
-            loop = AgentLoop(provider, registry, bus)
+            registry = self._build_registry(
+                task_manager,
+                session=session,
+                store=store,
+                run_id=run_id,
+            )
 
             cancelled = False
             try:
+                provider: LLMProvider = self._provider or AnthropicProvider(
+                    self._config.llm.default_model
+                )
+                if self._trace is not None:
+                    provider = TracingProvider(
+                        provider,
+                        self._trace,
+                        include_payload=self._config.trace.include_llm_payload,
+                    )
+                loop = AgentLoop(provider, registry, bus)
                 await loop.run(context)
             except asyncio.CancelledError:
                 cancelled = True
                 if not context.is_done():
                     context.mark_failed("cancelled")
+            except Exception:
+                if not context.is_done():
+                    context.mark_failed("llm_error")
 
             await bus.publish(
                 RunFinishedEvent(
@@ -122,6 +160,12 @@ class AgentRunner:
                     steps=context.step,
                     ts=_now(),
                 )
+            )
+
+        if session is not None and store is not None:
+            store.append_messages(
+                session.id,context.messages[prefill_len:],
+                run_id=run_id
             )
 
         if cancelled:

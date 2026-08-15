@@ -14,5 +14,6 @@ class LLMProvider(Protocol):
             bus: EventBus,
             run_id: str,
             *,
-            step: int = 0
+            step: int = 0,
+            system: str | None = None,
     ) -> LlmResponse: ...

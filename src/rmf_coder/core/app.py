@@ -19,13 +19,23 @@ from rmf_coder.core.bus.commands import (
     AgentRunResult,
     EventSubscribeCommand,
     EventSubscribeResult,
-    PongResult, )
+    PongResult,
+    SessionCloseCommand,
+    SessionCloseResult,
+    SessionCreateCommand,
+    SessionCreateResult,
+    SessionGetHistoryCommand,
+    SessionGetHistoryResult,
+    SessionSendMessageCommand,
+    SessionSendMessageResult,
+)
 from rmf_coder.core.bus.envelope import EventPushEnvelope
 from rmf_coder.core.config import RMFConfig, get_config
 from rmf_coder.core.events.bus import EventBus
 from rmf_coder.core.logging_setup import setup_logging
 from rmf_coder.core.runner import AgentRunner
 from rmf_coder.core.runs import events_file, new_run_id
+from rmf_coder.core.session import SessionManager, SessionStore
 from rmf_coder.core.trace.record import TraceRecord
 from rmf_coder.core.trace.writer import TraceWriter
 from rmf_coder.core.transport.ipc_broadcaster import IpcEventBroadcaster
@@ -45,7 +55,8 @@ class CoreApp:
         self._broadcaster: IpcEventBroadcaster | None = None
         self._trace: TraceWriter | None = None
         self._config: RMFConfig | None = None
-        self._running_runs: set[asyncio.Task[None]] = set()
+        self._running_runs: set[asyncio.Task[Any]] = set()
+        self._sessions: SessionManager | None = None
 
     async def _ping_handler(self, params: dict[str, Any]) -> PongResult:
         client = params.get("client", "unknown")
@@ -71,14 +82,40 @@ class CoreApp:
         )
 
     async def _agent_run_handler(self, params: dict[str, Any]) -> AgentRunResult:
-        assert self._config is not None
+        assert self._sessions is not None
         cmd = AgentRunCommand.model_validate(params)
+        session = await self._sessions.create(mode="one_shot", title=cmd.goal[:40])
         run_id = new_run_id()
-        runner = AgentRunner(self._config, bus=self._bus, trace=self._trace)
-        run_task = asyncio.create_task(runner.run(cmd.goal, run_id=run_id))
+        run_task = asyncio.create_task(
+            self._sessions.send_massage(session.id, cmd.goal, run_id=run_id)
+        )
         self._running_runs.add(run_task)
         run_task.add_done_callback(self._running_runs.discard)
         return AgentRunResult(run_id=run_id)
+
+    async def _session_create_handler(self, params: dict[str, Any]) -> SessionCreateResult:
+        assert self._sessions is not None
+        cmd = SessionCreateCommand.model_validate(params)
+        session = await self._sessions.create(mode=cmd.mode, title=cmd.title)
+        return SessionCreateResult(session_id=session.id, status=session.status)
+
+    async def _session_send_handler(self, params: dict[str, Any]) -> SessionSendMessageResult:
+        assert self._sessions is not None
+        cmd = SessionSendMessageCommand.model_validate(params)
+        run_id = await self._sessions.send_massage(cmd.session_id, cmd.content)
+        return SessionSendMessageResult(run_id=run_id)
+
+    async def _session_history_handler(self, params: dict[str, Any]) -> SessionGetHistoryResult:
+        assert self._sessions is not None
+        cmd = SessionGetHistoryCommand.model_validate(params)
+        messages = await self._sessions.get_history(cmd.session_id)
+        return SessionGetHistoryResult(messages=messages)
+
+    async def _session_close_handler(self, params: dict[str, Any]) -> SessionCloseResult:
+        assert self._sessions is not None
+        cmd = SessionCloseCommand.model_validate(params)
+        await self._sessions.close(cmd.session_id)
+        return SessionCloseResult(status="closed")
 
     async def _subscribe_handler(self, params: dict[str, Any]) -> EventSubscribeResult:
         cmd = EventSubscribeCommand.model_validate(params)
@@ -101,6 +138,12 @@ class CoreApp:
             topics: list[str],
     ) -> int:
         path = events_file(run_id)
+        if not path.exists():
+            for candidate in Path("~/.rmf/sessions").expanduser().glob(
+                    f"*/runs/{run_id}/events.jsonl"
+            ):
+                path = candidate
+                break
         if not path.exists():
             return 0
 
@@ -136,6 +179,17 @@ class CoreApp:
 
         self._broadcaster = IpcEventBroadcaster(trace=self._trace)
         self._bus.subscribe(self._broadcaster.handle)
+        session_root = Path("~/.rmf/sessions").expanduser()
+        store = SessionStore(session_root)
+        self._sessions = SessionManager(
+            store,
+            runner_factory=lambda: AgentRunner(
+                self._config,
+                bus=self._bus,
+                trace=self._trace
+            ),
+            bus=self._bus,
+        )
 
         server = SocketServer(
             self._config.host,
@@ -146,6 +200,10 @@ class CoreApp:
         server.register("core.ping", self._ping_handler)
         server.register("agent.run", self._agent_run_handler)
         server.register("event.subscribe", self._subscribe_handler)
+        server.register("session.create", self._session_create_handler)
+        server.register("session.send_message", self._session_send_handler)
+        server.register("session.get_history", self._session_history_handler)
+        server.register("session.close", self._session_close_handler)
 
         addr = await server.start()
         logger.info("rmf-core %s listening addr=%s", rmf_coder.__version__, addr)
