@@ -99,7 +99,7 @@ class SocketServer:
             writer.close()
             try:
                 await asyncio.wait_for(writer.wait_closed(), timeout=1.0)
-            except TimeoutError:
+            except (TimeoutError, ConnectionResetError, BrokenPipeError, OSError):
                 pass
             logger.debug("client disconnected: %s", peer)
 
@@ -117,9 +117,9 @@ class SocketServer:
             if not line:
                 return
 
-            await self.handle_line(line, writer)
+            asyncio.create_task(self._handle_line(line, writer))
 
-    async def handle_line(self, line: bytes, writer: asyncio.StreamWriter) -> None:
+    async def _handle_line(self, line: bytes, writer: asyncio.StreamWriter) -> None:
         try:
             raw: Any = json.loads(line)
         except json.JSONDecodeError as e:
@@ -171,7 +171,10 @@ class SocketServer:
             return
 
         result_data: Any = result.model_dump() if isinstance(result, BaseModel) else result
-        await self._send(writer, JsonRpcSuccess(id=req.id, result=result_data))
+        try:
+            await self._send(writer, JsonRpcSuccess(id=req.id, result=result_data))
+        except (ConnectionResetError, BrokenPipeError, OSError):
+            logger.debug("client disconnected before response for %s", req.method)
 
     async def _send(self, writer: asyncio.StreamWriter, msg: BaseModel) -> None:
         writer.write(msg.model_dump_json().encode() + b"\n")

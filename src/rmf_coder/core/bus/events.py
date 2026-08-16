@@ -64,9 +64,10 @@ class ToolCallFailedEvent(BaseModel):
     run_id: str
     tool_use_id: str
     tool_name: str
-    error_type: str
+    error_class: str
     error_message: str
     elapsed_ms: int
+    attempt: int = 1
     ts: str
 
 
@@ -137,6 +138,33 @@ class SessionClosedEvent(BaseModel):
     ts: str
 
 
+class PermissionRequestedEvent(BaseModel):
+    type: Literal["permission.requested"] = "permission.requested"
+    run_id: str
+    tool_use_id: str
+    tool_name: str
+    params: dict[str, Any]
+    param_preview: str
+    session_id: str
+    ts: str
+
+
+class PermissionGrantedEvent(BaseModel):
+    type: Literal["permission.granted"] = "permission.granted"
+    run_id: str
+    tool_use_id: str
+    decision: str
+    ts: str
+
+
+class PermissionDeniedEvent(BaseModel):
+    type: Literal["permission.denied"] = "permission.denied"
+    run_id: str
+    tool_use_id: str
+    decision: str
+    ts: str
+
+
 Event = Annotated[
     CoreStartedEvent
     | RunStartedEvent
@@ -154,6 +182,9 @@ Event = Annotated[
     | SessionMessageReceivedEvent
     | SessionWaitingForInputEvent
     | SessionResumedEvent
-    | SessionClosedEvent,
-    Discriminator("type")
+    | SessionClosedEvent
+    | PermissionRequestedEvent
+    | PermissionGrantedEvent
+    | PermissionDeniedEvent,
+    Discriminator("type"),
 ]

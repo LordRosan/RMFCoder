@@ -28,11 +28,15 @@ from rmf_coder.core.bus.commands import (
     SessionGetHistoryResult,
     SessionSendMessageCommand,
     SessionSendMessageResult,
+    PermissionRespondCommand,
+    PermissionRespondResult,
 )
 from rmf_coder.core.bus.envelope import EventPushEnvelope
 from rmf_coder.core.config import RMFConfig, get_config
 from rmf_coder.core.events.bus import EventBus
 from rmf_coder.core.logging_setup import setup_logging
+from rmf_coder.core.permissions.manager import PermissionManager
+from rmf_coder.core.permissions.storage import load_policy_file
 from rmf_coder.core.runner import AgentRunner
 from rmf_coder.core.runs import events_file, new_run_id
 from rmf_coder.core.session import SessionManager, SessionStore
@@ -57,6 +61,7 @@ class CoreApp:
         self._config: RMFConfig | None = None
         self._running_runs: set[asyncio.Task[Any]] = set()
         self._sessions: SessionManager | None = None
+        self._permission_manager: PermissionManager | None = None
 
     async def _ping_handler(self, params: dict[str, Any]) -> PongResult:
         client = params.get("client", "unknown")
@@ -87,7 +92,7 @@ class CoreApp:
         session = await self._sessions.create(mode="one_shot", title=cmd.goal[:40])
         run_id = new_run_id()
         run_task = asyncio.create_task(
-            self._sessions.send_massage(session.id, cmd.goal, run_id=run_id)
+            self._sessions.send_message(session.id, cmd.goal, run_id=run_id)
         )
         self._running_runs.add(run_task)
         run_task.add_done_callback(self._running_runs.discard)
@@ -102,7 +107,7 @@ class CoreApp:
     async def _session_send_handler(self, params: dict[str, Any]) -> SessionSendMessageResult:
         assert self._sessions is not None
         cmd = SessionSendMessageCommand.model_validate(params)
-        run_id = await self._sessions.send_massage(cmd.session_id, cmd.content)
+        run_id = await self._sessions.send_message(cmd.session_id, cmd.content)
         return SessionSendMessageResult(run_id=run_id)
 
     async def _session_history_handler(self, params: dict[str, Any]) -> SessionGetHistoryResult:
@@ -110,6 +115,15 @@ class CoreApp:
         cmd = SessionGetHistoryCommand.model_validate(params)
         messages = await self._sessions.get_history(cmd.session_id)
         return SessionGetHistoryResult(messages=messages)
+
+    async def _permission_respond_handler(self, params: dict[str, Any]) -> PermissionRespondResult:
+        cmd = PermissionRespondCommand.model_validate(params)
+        logger.info("permission.respond received tool_use_id=%s decision=%s", cmd.tool_use_id, cmd.decision)
+        if self._permission_manager is None:
+            logger.error("permission.respond: PermissionManager not initialized")
+            return PermissionRespondResult()
+        self._permission_manager.respond(cmd.tool_use_id, cmd.decision)
+        return PermissionRespondResult()
 
     async def _session_close_handler(self, params: dict[str, Any]) -> SessionCloseResult:
         assert self._sessions is not None
@@ -177,6 +191,17 @@ class CoreApp:
             await self._trace.start()
             self._bus.subscribe(self._trace_event_handler)
 
+        policy_file = Path("~/.rmf/policy.toml").expanduser()
+        self._permission_manager = PermissionManager(
+            policy_file=policy_file,
+            timeout_s=self._config.permission.timeout_s
+        )
+        logger.info(
+            "permission manager: timeout_s=%.1f  persistent=%d entries",
+            self._config.permission.timeout_s,
+            len(load_policy_file(policy_file)),
+        )
+
         self._broadcaster = IpcEventBroadcaster(trace=self._trace)
         self._bus.subscribe(self._broadcaster.handle)
         session_root = Path("~/.rmf/sessions").expanduser()
@@ -186,7 +211,8 @@ class CoreApp:
             runner_factory=lambda: AgentRunner(
                 self._config,
                 bus=self._bus,
-                trace=self._trace
+                trace=self._trace,
+                permission_manager=self._permission_manager,
             ),
             bus=self._bus,
         )
@@ -204,6 +230,7 @@ class CoreApp:
         server.register("session.send_message", self._session_send_handler)
         server.register("session.get_history", self._session_history_handler)
         server.register("session.close", self._session_close_handler)
+        server.register("permission.respond", self._permission_respond_handler)
 
         addr = await server.start()
         logger.info("rmf-core %s listening addr=%s", rmf_coder.__version__, addr)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
 from rmf_coder.core.bus.events import StepStartedEvent, StepFinishedEvent
 from rmf_coder.core.context import ExecutionContext
@@ -9,6 +10,9 @@ from rmf_coder.core.events.bus import EventBus
 from rmf_coder.core.llm.base import LLMProvider
 from rmf_coder.core.tools.invocation import invoke_tool
 from rmf_coder.core.tools.registry import ToolRegistry
+
+if TYPE_CHECKING:
+    from rmf_coder.core.permissions.manager import PermissionManager
 
 
 def _now() -> str:
@@ -21,10 +25,15 @@ class AgentLoop:
             provider: LLMProvider,
             registry: ToolRegistry,
             bus: EventBus,
+            *,
+            permission_manager: PermissionManager | None = None,
+            session_id: str = "",
     ) -> None:
         self._provider = provider
         self._registry = registry
         self._bus = bus
+        self._permission_manager = permission_manager
+        self._session_id = session_id
 
     async def run(self, context: ExecutionContext) -> None:
         while not context.is_done():
@@ -62,7 +71,11 @@ class AgentLoop:
 
             if response.stop_reason == "tool_use":
                 for tc in response.tool_calls:
-                    result = await invoke_tool(self._registry, tc, self._bus, context.run_id)
+                    result = await invoke_tool(
+                        self._registry, tc, self._bus, context.run_id,
+                        permission_manager=self._permission_manager,
+                        session_id=self._session_id,
+                    )
                     context.add_tool_result(tc.id, result.content, is_error=result.is_error)
 
             if response.stop_reason == "end_turn":

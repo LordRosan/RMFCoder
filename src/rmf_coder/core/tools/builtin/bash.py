@@ -2,13 +2,22 @@ from __future__ import annotations
 
 import asyncio
 
+from pydantic import BaseModel, ConfigDict, Field
+
 from rmf_coder.core.tools.base import BaseTool, ToolResult
 
 _MAX_OUTPUT_BYTES = 64 * 1024
 _DEFAULT_TIMEOUT = 60
 
 
+class BashParams(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    command: str
+    timeout: int = Field(default=_DEFAULT_TIMEOUT, ge=1, le=120)
+
+
 class BashTool(BaseTool):
+    params_model = BashParams
     name = "bash"
     description = (
         "Execute a shell command and return its output (stdout + stderr combined). "
@@ -31,8 +40,9 @@ class BashTool(BaseTool):
     }
 
     async def invoke(self, params: dict[str, object]) -> ToolResult:
-        command = str(params["command"])
-        timeout = min(int(str(params.get("timeout") or _DEFAULT_TIMEOUT)), 120)
+        p = BashParams.model_validate(params)
+        command = p.command
+        timeout = p.timeout
 
         try:
             proc = await asyncio.create_subprocess_shell(

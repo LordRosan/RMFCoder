@@ -62,7 +62,7 @@ class SessionManager:
         await self._bus.publish(SessionCreatedEvent(session_id=sid, mode=mode, ts=ts))
         return session
 
-    async def send_massage(
+    async def send_message(
             self,
             sid: str,
             content: str,
