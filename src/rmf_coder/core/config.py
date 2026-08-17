@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 _DEFAULT_HOST_ = "127.0.0.1"
 _DEFAULT_PORT_ = 7438
 _DEFAULT_LOG_LEVEL_ = "INFO"
-_DEFAULT_LOG_FILE_ = "~/.rmf/core.log"
+_DEFAULT_LOG_FILE_ = "~/.rmf/logs/core.log"
 _DEFAULT_LOG_FORMAT_ = "text"
 _DEFAULT_CONFIG_PATH_ = "~/.rmf/config.toml"
 _DEFAULT_MAX_STEPS = 20
@@ -50,6 +50,13 @@ class PermissionConfig:
 
 
 @dataclass
+class CompactionConfig:
+    auto_threshold: float = 0.0
+    tool_result_limit: int = 8_000
+    tool_result_keep: int = 4_000
+
+
+@dataclass
 class RMFConfig:
     host: str = _DEFAULT_HOST_
     port: int = _DEFAULT_PORT_
@@ -58,6 +65,7 @@ class RMFConfig:
     llm: LlmConfig = field(default_factory=LlmConfig)
     trace: TraceConfig = field(default_factory=TraceConfig)
     permission: PermissionConfig = field(default_factory=PermissionConfig)
+    compaction: CompactionConfig = field(default_factory=CompactionConfig)
 
 
 def get_config() -> RMFConfig:
@@ -79,7 +87,9 @@ def get_config() -> RMFConfig:
 
 
 def _apply_toml(config: RMFConfig, data: dict[str, Any]) -> None:
-    unknown = set(data.keys()) - {"core", "logging", "agent", "llm", "trace", "permission"}
+    unknown = set(data.keys()) - {
+        "core", "logging", "agent", "llm", "trace", "permission", "compaction"
+    }
     if unknown:
         raise SystemExit(f"Unknown top-level config keys: {', '.join(sorted(unknown))}")
 
@@ -182,6 +192,29 @@ def _apply_toml(config: RMFConfig, data: dict[str, Any]) -> None:
                 raise SystemExit("Config error: permission.timeout_s must be a non-negative number")
             config.permission.timeout_s = float(val)
 
+    if "compaction" in data:
+        comp = data["compaction"]
+        if not isinstance(comp, dict):
+            raise SystemExit("Config error: [compaction] must be a table")
+        unknown_comp: set[str] = set(comp.keys()) - {"auto_threshold", "tool_result_limit", "tool_result_keep"}
+        if unknown_comp:
+            raise SystemExit(f"Unknown [compaction] keys: {', '.join(sorted(unknown_comp))}")
+        if "auto_threshold" in comp:
+            val = comp["auto_threshold"]
+            if not isinstance(val, (int, float)) or not (0.0 <= val <= 1.0):
+                raise SystemExit("Config error: compaction.auto_threshold must be between 0 and 1")
+            config.compaction.auto_threshold = float(val)
+        if "tool_result_limit" in comp:
+            val = comp["tool_result_limit"]
+            if not isinstance(val, int) or val <= 0:
+                raise SystemExit("Config error: compaction.tool_result_limit must be a positive integer")
+            config.compaction.tool_result_limit = val
+        if "tool_result_keep" in comp:
+            val = comp["tool_result_keep"]
+            if not isinstance(val, int) or val <= 0:
+                raise SystemExit("Config error: compaction.tool_result_keep must be a positive integer")
+            config.compaction.tool_result_keep = val
+
 
 def _apply_env(config: RMFConfig) -> None:
     host = os.environ.get("RMF_HOST")
@@ -212,7 +245,10 @@ def _apply_env(config: RMFConfig) -> None:
         try:
             val = int(max_steps_str)
             if val <= 0:
-                raise SystemExit("Config error: RMF_MAX_STEPS must be a positive integer,"f"got: {max_steps_str!r}")
+                raise SystemExit(
+                    "Config error: RMF_MAX_STEPS must be a positive integer,"
+                    ""f"got: {max_steps_str!r}"
+                )
             config.agent.max_steps = val
         except ValueError:
             raise SystemExit(f"Config error: RMF_MAX_STEPS must be an integer, got: {max_steps_str!r}")
@@ -236,13 +272,55 @@ def _apply_env(config: RMFConfig) -> None:
     perm_timeout = os.environ.get("RMF_PERMISSION_TIMEOUT_S")
     if perm_timeout is not None:
         try:
-            val = float(perm_timeout)
-            if val < 0:
+            perm_timeout_val = float(perm_timeout)
+            if perm_timeout_val < 0:
                 raise SystemExit(
                     f"Config error: RMF_PERMISSION_TIMEOUT_S must be >= 0, got: {perm_timeout!r}"
                 )
-            config.permission.timeout_s = val
+            config.permission.timeout_s = perm_timeout_val
         except ValueError:
             raise SystemExit(
                 f"Config error: RMF_PERMISSION_TIMEOUT_S must be a number, got: {perm_timeout!r}"
+            )
+
+    compact_threshold = os.environ.get("RMF_COMPACT_THRESHOLD")
+    if compact_threshold is not None:
+        try:
+            compact_threshold_val = float(compact_threshold)
+            if not (0.0 <= compact_threshold_val <= 1.0):
+                raise SystemExit(
+                    f"Config error: RMF_COMPACT_THRESHOLD must be between 0 and 1, got: {compact_threshold!r}"
+                )
+            config.compaction.auto_threshold = compact_threshold_val
+        except ValueError:
+            raise SystemExit(
+                f"Config error: RMF_COMPACT_THRESHOLD must be a number, got: {compact_threshold!r}"
+            )
+
+    compact_tool_limit = os.environ.get("RMF_COMPACT_TOOL_LIMIT")
+    if compact_tool_limit is not None:
+        try:
+            compact_tool_limit_val = int(compact_tool_limit)
+            if compact_tool_limit_val <= 0:
+                raise SystemExit(
+                    f"Config error: RMF_COMPACT_TOOL_LIMIT must be a positive integer, got: {compact_tool_limit!r}"
+                )
+            config.compaction.tool_result_limit = compact_tool_limit_val
+        except ValueError:
+            raise SystemExit(
+                f"Config error: RMF_COMPACT_TOOL_LIMIT must be an integer, got: {compact_tool_limit!r}"
+            )
+
+    compact_tool_keep = os.environ.get("RMF_COMPACT_TOOL_KEEP")
+    if compact_tool_keep is not None:
+        try:
+            compact_tool_keep_val = int(compact_tool_keep)
+            if compact_tool_keep_val <= 0:
+                raise SystemExit(
+                    f"Config error: RMF_COMPACT_TOOL_KEEP must be a positive integer, got: {compact_tool_keep!r}"
+                )
+            config.compaction.tool_result_keep = compact_tool_keep_val
+        except ValueError:
+            raise SystemExit(
+                f"Config error: RMF_COMPACT_TOOL_KEEP must be an integer, got: {compact_tool_keep!r}"
             )

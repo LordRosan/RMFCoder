@@ -85,6 +85,7 @@ class LlmUsageEvent(BaseModel):
     output_tokens: int
     cache_read_input_tokens: int
     cache_creation_input_tokens: int
+    context_pct: float = 0.0
     ts: str
 
 
@@ -138,6 +139,15 @@ class SessionClosedEvent(BaseModel):
     ts: str
 
 
+class ContextCompactedEvent(BaseModel):
+    type: Literal["context.compacted"] = "context.compacted"
+    session_id: str
+    run_id: str
+    original_tokens: int
+    summary_tokens: int
+    ts: str
+
+
 class PermissionRequestedEvent(BaseModel):
     type: Literal["permission.requested"] = "permission.requested"
     run_id: str
@@ -183,6 +193,7 @@ Event = Annotated[
     | SessionWaitingForInputEvent
     | SessionResumedEvent
     | SessionClosedEvent
+    | ContextCompactedEvent
     | PermissionRequestedEvent
     | PermissionGrantedEvent
     | PermissionDeniedEvent,

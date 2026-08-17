@@ -98,7 +98,9 @@ class SessionStore:
                 continue
             messages.append({"role": role, "content": row.get("content", "")})
 
-        return self._trim_orphan_tool_use(messages)
+        messages = self._trim_orphan_tool_use(messages)
+        from rmf_coder.core.compact.budget import truncate_tool_results
+        return truncate_tool_results(messages)
 
     def _trim_orphan_tool_use(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         pending: set[str] = set()
@@ -120,6 +122,17 @@ class SessionStore:
             logger.warning("trim orphan tool_use blocks from thread")
             return messages[:last_balanced]
         return messages
+
+    def write_compacted(self, sid: str, messages: list[dict[str, Any]]) -> None:
+        path = self.session_dir(sid) / "thread.jsonl"
+        ts_str = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
+        bak = self.session_dir(sid) / f"thread_{ts_str}.jsonl.bak"
+        if path.exists():
+            path.rename(bak)
+        with path.open("w", encoding="utf-8") as f:
+            for msg in messages:
+                row: dict[str, Any] = {"ts": _now(), "role": msg["role"], "content": msg["content"]}
+                f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
     def read_notes(self, sid: str) -> str:
         path = self.session_dir(sid) / "notes.md"

@@ -22,6 +22,8 @@ from rmf_coder.core.bus.commands import (
     PongResult,
     SessionCloseCommand,
     SessionCloseResult,
+    SessionCompactCommand,
+    SessionCompactResult,
     SessionCreateCommand,
     SessionCreateResult,
     SessionGetHistoryCommand,
@@ -34,6 +36,7 @@ from rmf_coder.core.bus.commands import (
 from rmf_coder.core.bus.envelope import EventPushEnvelope
 from rmf_coder.core.config import RMFConfig, get_config
 from rmf_coder.core.events.bus import EventBus
+from rmf_coder.core.llm.provider import AnthropicProvider
 from rmf_coder.core.logging_setup import setup_logging
 from rmf_coder.core.permissions.manager import PermissionManager
 from rmf_coder.core.permissions.storage import load_policy_file
@@ -125,6 +128,12 @@ class CoreApp:
         self._permission_manager.respond(cmd.tool_use_id, cmd.decision)
         return PermissionRespondResult()
 
+    async def _session_compact_handler(self, params: dict[str, Any]) -> SessionCompactResult:
+        assert self._sessions is not None
+        cmd = SessionCompactCommand.model_validate(params)
+        result = await self._sessions.compact(cmd.session_id, cmd.focus)
+        return result
+
     async def _session_close_handler(self, params: dict[str, Any]) -> SessionCloseResult:
         assert self._sessions is not None
         cmd = SessionCloseCommand.model_validate(params)
@@ -206,15 +215,18 @@ class CoreApp:
         self._bus.subscribe(self._broadcaster.handle)
         session_root = Path("~/.rmf/sessions").expanduser()
         store = SessionStore(session_root)
+        assert self._config is not None
+        compact_provider = AnthropicProvider(self._config.llm.default_model)
         self._sessions = SessionManager(
             store,
             runner_factory=lambda: AgentRunner(
-                self._config,
+                self._config,  # type: ignore[arg-type]
                 bus=self._bus,
                 trace=self._trace,
                 permission_manager=self._permission_manager,
             ),
             bus=self._bus,
+            provider=compact_provider,
         )
 
         server = SocketServer(
@@ -231,6 +243,7 @@ class CoreApp:
         server.register("session.get_history", self._session_history_handler)
         server.register("session.close", self._session_close_handler)
         server.register("permission.respond", self._permission_respond_handler)
+        server.register("session.compact", self._session_compact_handler)
 
         addr = await server.start()
         logger.info("rmf-core %s listening addr=%s", rmf_coder.__version__, addr)

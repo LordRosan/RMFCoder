@@ -20,6 +20,7 @@ from rmf_coder.core.session.model import Session, SessionMode
 from rmf_coder.core.session.store import SessionStore
 
 if TYPE_CHECKING:
+    from rmf_coder.core.llm.base import LLMProvider
     from rmf_coder.core.runner import AgentRunner
 
 SESSION_NOT_FOUND = -32010
@@ -37,10 +38,12 @@ class SessionManager:
             store: SessionStore,
             runner_factory: Callable[[], AgentRunner],
             bus: EventBus,
+            provider: LLMProvider | None = None,
     ) -> None:
         self._store = store
         self._runner_factory = runner_factory
         self._bus = bus
+        self._provider = provider
         self._session: dict[str, Session] = {}
         self._locks: dict[str, asyncio.Lock] = {}
 
@@ -131,6 +134,31 @@ class SessionManager:
             self._store.write_meta(session)
             await self._bus.publish(
                 SessionClosedEvent(session_id=sid, ts=session.updated_at)
+            )
+
+    async def compact(self, sid: str, focus: str = "") -> Any:
+        session = self._get_session(sid)
+        lock = self._locks[sid]
+        if lock.locked():
+            raise HandlerError(SESSION_BUSY, "session busy")
+        if self._provider is None:
+            raise HandlerError(-32020, "provider not available for compaction")
+        async  with lock:
+            from rmf_coder.core.bus.commands import SessionCompactResult
+            from rmf_coder.core.compact.compactor import Compactor
+            messages = self._store.read_messages(sid)
+            session_dir = self._store.session_dir(sid)
+            compactor = Compactor(self._bus, session_dir, sid)
+            result = await compactor.compact_messages(messages, self._provider, focus=focus)
+            if result is None:
+                raise HandlerError(-32021, "compaction failed or not beneficial")
+            self._store.write_compacted(sid, [
+                {"role": "user", "content": result.summary_text},
+                {"role": "assistant", "content": "Understood, I'll continue from this summary."},
+            ])
+            return SessionCompactResult(
+                summary_tokens=result.summary_tokens,
+                saved_tokens=max(0, result.original_token_estimate - result.summary_tokens),
             )
 
     async def get_history(self, sid: str) -> list[dict[str, Any]]:
