@@ -10,7 +10,7 @@ from rmf_coder.core.bus.envelope import JsonRpcRequest
 
 type EventHandler = Callable[[dict[str, Any]], Awaitable[None]]
 
-_MAX_LINE_BYTES = 1 * 1024 * 1024
+_MAX_LINE_BYTES = 64 * 1024 * 1024
 
 
 class IpcError(RuntimeError):
@@ -64,6 +64,8 @@ class SocketClient:
                     line = await self._reader.readline()
                 except (ConnectionResetError, OSError):
                     break
+                except (ValueError, asyncio.LimitOverrunError):
+                    continue
                 if not line:
                     break
                 await self._dispatch(line)

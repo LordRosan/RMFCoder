@@ -38,6 +38,7 @@ from rmf_coder.core.config import RMFConfig, get_config
 from rmf_coder.core.events.bus import EventBus
 from rmf_coder.core.llm.provider import AnthropicProvider
 from rmf_coder.core.logging_setup import setup_logging
+from rmf_coder.core.mcp.server import McpServerManager
 from rmf_coder.core.permissions.manager import PermissionManager
 from rmf_coder.core.permissions.storage import load_policy_file
 from rmf_coder.core.runner import AgentRunner
@@ -65,6 +66,7 @@ class CoreApp:
         self._running_runs: set[asyncio.Task[Any]] = set()
         self._sessions: SessionManager | None = None
         self._permission_manager: PermissionManager | None = None
+        self._mcp_manager: McpServerManager | None = None
 
     async def _ping_handler(self, params: dict[str, Any]) -> PongResult:
         client = params.get("client", "unknown")
@@ -121,7 +123,10 @@ class CoreApp:
 
     async def _permission_respond_handler(self, params: dict[str, Any]) -> PermissionRespondResult:
         cmd = PermissionRespondCommand.model_validate(params)
-        logger.info("permission.respond received tool_use_id=%s decision=%s", cmd.tool_use_id, cmd.decision)
+        logger.info(
+            "permission.respond received tool_use_id=%s decision=%s",
+            cmd.tool_use_id, cmd.decision,
+        )
         if self._permission_manager is None:
             logger.error("permission.respond: PermissionManager not initialized")
             return PermissionRespondResult()
@@ -132,7 +137,7 @@ class CoreApp:
         assert self._sessions is not None
         cmd = SessionCompactCommand.model_validate(params)
         result = await self._sessions.compact(cmd.session_id, cmd.focus)
-        return result
+        return result  # type: ignore[no-any-return]
 
     async def _session_close_handler(self, params: dict[str, Any]) -> SessionCloseResult:
         assert self._sessions is not None
@@ -217,6 +222,12 @@ class CoreApp:
         store = SessionStore(session_root)
         assert self._config is not None
         compact_provider = AnthropicProvider(self._config.llm.default_model)
+
+        self._mcp_manager = McpServerManager()
+        if self._config.mcp.servers:
+            logger.info("mcp: starting %d server(s)", len(self._config.mcp.servers))
+            await self._mcp_manager.start_all(self._config.mcp.servers)
+
         self._sessions = SessionManager(
             store,
             runner_factory=lambda: AgentRunner(
@@ -224,6 +235,7 @@ class CoreApp:
                 bus=self._bus,
                 trace=self._trace,
                 permission_manager=self._permission_manager,
+                mcp_manager=self._mcp_manager,
             ),
             bus=self._bus,
             provider=compact_provider,
@@ -251,17 +263,18 @@ class CoreApp:
 
         loop = asyncio.get_event_loop()
         shutdown = asyncio.Event()
-        try:
-            loop.add_signal_handler(signal.SIGINT, shutdown.set)
-            loop.add_signal_handler(signal.SIGTERM, shutdown.set)
-        except NotImplementedError:
-            pass
+        loop.add_signal_handler(signal.SIGINT, shutdown.set)
+        loop.add_signal_handler(signal.SIGTERM, shutdown.set)
+
         await shutdown.wait()
+
         logger.info("shutting down")
         for run_task in list(self._running_runs):
             run_task.cancel()
         if self._running_runs:
             await asyncio.gather(*self._running_runs, return_exceptions=True)
+        if self._mcp_manager is not None:
+            await self._mcp_manager.stop_all()
         await server.stop()
         if self._trace is not None:
             await self._trace.stop()

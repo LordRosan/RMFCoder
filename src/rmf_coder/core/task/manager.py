@@ -113,5 +113,5 @@ class TaskManager:
         lines = []
         for t in tasks:
             blocked = f" (blocked by: {t.blocked_by})" if t.blocked_by else ""
-            lines.append(f"{marker.get(t.status, '[?]')} #{t.id}: ({t.subject}){blocked}")
+            lines.append(f"{marker.get(t.status, '[?]')} #{t.id}: {t.subject}{blocked}")
         return "\n".join(lines)

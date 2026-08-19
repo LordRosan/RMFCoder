@@ -8,7 +8,6 @@ from typing import Any
 
 import anthropic
 import httpx
-from anthropic.types import Usage
 
 from rmf_coder.core.bus.events import LlmModelSelectedEvent, LlmTokenEvent, LlmUsageEvent
 from rmf_coder.core.events.bus import EventBus
@@ -137,16 +136,22 @@ class AnthropicProvider:
         )
 
         tool_call: list[ToolCallBlock] = []
+        thinking_blocks: list[dict[str, object]] = []
         for block in final_message.content:
             if block.type == "tool_use":
                 tool_call.append(
                     ToolCallBlock(id=block.id, name=block.name, input=dict(block.input))
+                )
+            elif block.type == "thinking":
+                thinking_blocks.append(
+                    {"type": "thinking", "thinking": block.thinking, "signature": block.signature}
                 )
 
         return LlmResponse(
             stop_reason=final_message.stop_reason or "end_turn",
             tool_calls=tool_call,
             text="".join(text_parts),
+            thinking_blocks=thinking_blocks,
             usage=UsageStats(
                 input_tokens=usage.input_tokens,
                 output_tokens=usage.output_tokens,

@@ -57,7 +57,7 @@ class AgentLoop:
                     run_id=context.run_id,
                     step=context.step,
                     system=context.system_prompt(
-                        "you are a helpful AI assistant. "
+                        "You are a helpful AI assistant. "
                         "Use the available tools to complete the user's goal. "
                         "When the goal is fully achieved, respond with a final answer "
                         "and do not call any more tools."
@@ -73,11 +73,13 @@ class AgentLoop:
                 context.mark_failed("llm_error")
                 break
 
-            blocks: list[dict[str, object]] = []
+            blocks: list[dict[str, object]] = list(response.thinking_blocks)
             if response.text:
                 blocks.append({"type": "text", "text": response.text})
             for tc in response.tool_calls:
-                blocks.append({"type": "tool_use", "id": tc.id, "name": tc.name, "input": tc.input})
+                blocks.append(
+                    {"type": "tool_use", "id": tc.id, "name": tc.name, "input": tc.input}
+                )
             context.add_assistant_message(blocks)
 
             if response.stop_reason == "tool_use":
@@ -92,7 +94,7 @@ class AgentLoop:
                 for tc in response.tool_calls:
                     context.add_tool_result(
                         tc.id,
-                        "Error: output token limit reached before this tool call could be completed."
+                        "Error: output token limit reached before this tool call could be completed. "
                         "Please break the task into smaller steps and try again.",
                         is_error=True,
                     )

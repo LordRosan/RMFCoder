@@ -13,11 +13,13 @@ from rmf_coder.core.bus.events import (
     SessionMessageReceivedEvent,
     SessionResumedEvent,
     SessionWaitingForInputEvent,
+    SkillInvokedEvent,
 )
 from rmf_coder.core.events.bus import EventBus
 from rmf_coder.core.runs import new_run_id
 from rmf_coder.core.session.model import Session, SessionMode
 from rmf_coder.core.session.store import SessionStore
+from rmf_coder.core.skills.loader import SkillLoader
 
 if TYPE_CHECKING:
     from rmf_coder.core.llm.base import LLMProvider
@@ -46,6 +48,7 @@ class SessionManager:
         self._provider = provider
         self._session: dict[str, Session] = {}
         self._locks: dict[str, asyncio.Lock] = {}
+        self._skill_loader = SkillLoader()
 
     async def create(self, mode: SessionMode, title: str = "") -> Session:
         sid = f"sess-{uuid.uuid4().hex[:12]}"
@@ -97,12 +100,35 @@ class SessionManager:
             session.updated_at = _now()
             self._store.write_meta(session)
 
+            goal = content
+            system_prompt_override: str | None = None
+            tool_whitelist: list[str] | None = None
+            if content.startswith("/"):
+                parts = content[1:].split(None, 1)
+                skill_name = parts[0]
+                arguments = parts[1] if len(parts) > 1 else ""
+                skill = self._skill_loader.resolve(skill_name)
+                if skill is not None:
+                    goal = self._skill_loader.render_prompt(skill, arguments)
+                    system_prompt_override = skill.system_prompt_template
+                    tool_whitelist = skill.allowed_tools or None
+                    await self._bus.publish(
+                        SkillInvokedEvent(
+                            skill_name=skill_name,
+                            arguments=arguments,
+                            run_id=run_id,
+                            ts=_now(),
+                        )
+                    )
+
             runner = self._runner_factory()
             await runner.run_and_capture(
-                content,
+                goal,
                 run_id=run_id,
                 session=session,
                 store=self._store,
+                system_prompt_override=system_prompt_override,
+                tool_whitelist=tool_whitelist,
             )
 
             session.updated_at = _now()
@@ -137,7 +163,7 @@ class SessionManager:
             )
 
     async def compact(self, sid: str, focus: str = "") -> Any:
-        session = self._get_session(sid)
+        self._get_session(sid)
         lock = self._locks[sid]
         if lock.locked():
             raise HandlerError(SESSION_BUSY, "session busy")
